@@ -21,7 +21,7 @@ const TARGETS=[
 const REPORT=[{id:1,lat:24.155143,lng:107.523725},{id:11,lat:24.164198,lng:107.522073}];
 const MIRRORS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter"];
 const BBOX="23.90,107.35,24.22,107.65";
-const QUERY='[out:json][timeout:180];(way["natural"="water"]('+BBOX+');relation["natural"="water"]('+BBOX+');way["waterway"="riverbank"]('+BBOX+');way["waterway"="river"]('+BBOX+');relation["waterway"="river"]('+BBOX+');way["waterway"="canal"]('+BBOX+'););out geom;';
+const QUERY='[out:json][timeout:300];(way["natural"="water"]('+BBOX+');relation["natural"="water"]('+BBOX+');way["water"="reservoir"]('+BBOX+');relation["water"="reservoir"]('+BBOX+');way["water"="lake"]('+BBOX+');relation["water"="lake"]('+BBOX+');way["landuse"="reservoir"]('+BBOX+');relation["landuse"="reservoir"]('+BBOX+');way["waterway"="riverbank"]('+BBOX+');way["waterway"="river"]('+BBOX+');relation["waterway"="river"]('+BBOX+');way["waterway"="canal"]('+BBOX+'););out geom;';
 function log(s){document.getElementById('log').textContent+="\n"+s;}
 const M=111320;
 function project(p){const cx=Math.cos(p.lat*Math.PI/180);return{x:p.lon*M*cx,y:p.lat*M};}
@@ -56,21 +56,29 @@ async function run(){
   log("elements="+data.elements.length);
   const polys=[],segs=[];
   const gc=n=>n.map(nn=>({lat:nn.lat,lon:nn.lon}));
+  const isClosed=g=>{
+    if(g.length<3)return false;
+    const a=g[0],b=g[g.length-1];
+    const d=Math.hypot((a.lat-b.lat)*M,(a.lon-b.lon)*M*Math.cos(a.lat*Math.PI/180));
+    return d<100;
+  };
+  const addWay=g=>{
+    if(g.length<2)return;
+    if(isClosed(g))polys.push(g);
+    else for(let i=0;i<g.length-1;i++)segs.push([g[i],g[i+1]]);
+  };
   for(const el of data.elements){
     if(el.type==="way"){
-      const g=gc(el.geometry||[]);
-      if(g.length<2)continue;
-      const closed=g[0].lat===g[g.length-1].lat&&g[0].lon===g[g.length-1].lon;
-      if(closed)polys.push(g);
-      else for(let i=0;i<g.length-1;i++)segs.push([g[i],g[i+1]]);
+      addWay(gc(el.geometry||[]));
     }else if(el.type==="relation"){
-      for(const mb of el.members||[]){
-        if(mb.type!=="way"||!mb.geometry)continue;
-        const g=gc(mb.geometry);
-        if(g.length<2)continue;
-        if(mb.role==="outer")polys.push(g);
-        else for(let i=0;i<g.length-1;i++)segs.push([g[i],g[i+1]]);
+      if(el.members&&el.members.length){
+        for(const mb of el.members){
+          if(mb.type!=="way"||!mb.geometry)continue;
+          if(mb.role==="inner")continue;
+          addWay(gc(mb.geometry));
+        }
       }
+      if(el.geometry&&el.geometry.length&&(!el.members||!el.members.length))addWay(gc(el.geometry));
     }
   }
   log("polys="+polys.length+" segs="+segs.length);
@@ -78,7 +86,8 @@ async function run(){
   for(const t of TARGETS){
     const p={lat:t.lat,lon:t.lng};
     let st="none",nlat=t.lat,nlng=t.lng,moved=0;
-    if(polys.some(r=>pointInRing(p,r))){st="inside_water";}
+    const inPolys=polys.filter(r=>pointInRing(p,r));
+    if(inPolys.length){st="inside_water";}
     else{
       let best=null;
       for(const seg of segs){
@@ -87,12 +96,14 @@ async function run(){
       }
       if(best){moved=best.d;nlat=best.pt.lat;nlng=best.pt.lon;st=best.d<=3000?"snapped":"too_far";}
     }
-    out.push({id:t.id,status:st,lat:+nlat.toFixed(7),lng:+nlng.toFixed(7),moved_m:Math.round(moved)});
+    const rounded={lat:+nlat.toFixed(7),lng:+nlng.toFixed(7)};
+    if(inPolys.length)rounded.inside_poly=inPolys.length;
+    out.push({id:t.id,status:st,lat:rounded.lat,lng:rounded.lng,moved_m:Math.round(moved)});
   }
   const rep=[];
   for(const t of REPORT){
     const p={lat:t.lat,lon:t.lon};
-    let st="none",moved=0;
+    let st="none",nn=0;
     if(polys.some(r=>pointInRing(p,r)))st="inside_water";
     else{
       let best=null;
@@ -100,9 +111,9 @@ async function run(){
         const c=closestOnSeg(p,seg[0],seg[1]);
         if(!best||c.d<best.d)best=c;
       }
-      if(best){moved=best.d;st=best.d<=3000?"snapped":"too_far";}
+      if(best){nn=Math.round(best.d);st=best.d<=3000?"snapped":"too_far";}
     }
-    rep.push({id:t.id,status:st,moved_m:Math.round(moved)});
+    rep.push({id:t.id,status:st,nearest_m:nn});
   }
   document.getElementById('result').textContent="RESULT-OK\n"+JSON.stringify({targets:out,report:rep},null,1);
 }
