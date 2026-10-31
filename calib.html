@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>calib</title></head>
+<body>
+<pre id="log" style="white-space:pre-wrap">START</pre>
+<div id="result" style="white-space:pre-wrap;font-family:monospace"></div>
+<script>
+const TARGETS=[
+{id:7,lat:24.148767,lng:107.515270},{id:8,lat:24.135000,lng:107.505000},
+{id:9,lat:24.100000,lng:107.475000},{id:10,lat:24.156951,lng:107.483183},
+{id:12,lat:24.159671,lng:107.522899},{id:13,lat:24.158000,lng:107.514900},
+{id:14,lat:24.161500,lng:107.519300},{id:15,lat:24.151658,lng:107.522073},
+{id:16,lat:24.155314,lng:107.522073},{id:17,lat:24.156257,lng:107.522073},
+{id:18,lat:24.164198,lng:107.518154},{id:19,lat:24.164198,lng:107.514462},
+{id:20,lat:24.164198,lng:107.524406},{id:21,lat:24.164198,lng:107.533622},
+{id:22,lat:24.170728,lng:107.529230},{id:23,lat:24.146113,lng:107.436476},
+{id:24,lat:23.980528,lng:107.575724},{id:25,lat:23.974946,lng:107.520636},
+{id:26,lat:24.145000,lng:107.470000},{id:27,lat:24.135000,lng:107.462000},
+{id:28,lat:24.125000,lng:107.455000},{id:29,lat:24.115000,lng:107.460000},
+{id:30,lat:24.105000,lng:107.465000}];
+const REPORT=[{id:1,lat:24.155143,lng:107.523725},{id:11,lat:24.164198,lng:107.522073}];
+const MIRRORS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter"];
+const BBOX="23.90,107.35,24.22,107.65";
+const QUERY='[out:json][timeout:180];(way["natural"="water"]('+BBOX+');relation["natural"="water"]('+BBOX+');way["waterway"="riverbank"]('+BBOX+');way["waterway"="river"]('+BBOX+');relation["waterway"="river"]('+BBOX+');way["waterway"="canal"]('+BBOX+'););out geom;';
+function log(s){document.getElementById('log').textContent+="\n"+s;}
+const M=111320;
+function project(p){const cx=Math.cos(p.lat*Math.PI/180);return{x:p.lon*M*cx,y:p.lat*M};}
+function closestOnSeg(p,a,b){
+  const P=project(p),A=project(a),B=project(b);
+  const dx=B.x-A.x,dy=B.y-A.y,len2=dx*dx+dy*dy;
+  let t=len2===0?0:((P.x-A.x)*dx+(P.y-A.y)*dy)/len2;
+  t=Math.max(0,Math.min(1,t));
+  const X=A.x+t*dx,Y=A.y+t*dy,d=Math.hypot(P.x-X,P.y-Y);
+  const lat=Y/M,lon=X/(M*Math.cos(lat*Math.PI/180));
+  return{d:d,pt:{lat:lat,lon:lon}};
+}
+function pointInRing(p,ring){
+  let inside=false;const n=ring.length;
+  for(let i=0,j=n-1;i<n;j=i++){
+    const xi=ring[i].lon,yi=ring[i].lat,xj=ring[j].lon,yj=ring[j].lat;
+    if(((yi>p.lat)!==(yj>p.lat))&&(p.lon<(xj-xi)*(p.lat-yi)/(yj-yi)+xi))inside=!inside;
+  }
+  return inside;
+}
+async function run(){
+  let data=null,err=null;
+  for(const m of MIRRORS){
+    try{
+      log("fetching "+m);
+      const res=await fetch(m,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"data="+encodeURIComponent(QUERY)});
+      if(!res.ok)throw new Error("HTTP "+res.status);
+      data=await res.json();log("ok "+m);break;
+    }catch(e){err=e;log("fail "+m+" :: "+e.message);}
+  }
+  if(!data){document.getElementById('result').textContent="FETCH-FAIL :: "+(err&&err.message);return;}
+  log("elements="+data.elements.length);
+  const polys=[],segs=[];
+  const gc=n=>n.map(nn=>({lat:nn.lat,lon:nn.lon}));
+  for(const el of data.elements){
+    if(el.type==="way"){
+      const g=gc(el.geometry||[]);
+      if(g.length<2)continue;
+      const closed=g[0].lat===g[g.length-1].lat&&g[0].lon===g[g.length-1].lon;
+      if(closed)polys.push(g);
+      else for(let i=0;i<g.length-1;i++)segs.push([g[i],g[i+1]]);
+    }else if(el.type==="relation"){
+      for(const mb of el.members||[]){
+        if(mb.type!=="way"||!mb.geometry)continue;
+        const g=gc(mb.geometry);
+        if(g.length<2)continue;
+        if(mb.role==="outer")polys.push(g);
+        else for(let i=0;i<g.length-1;i++)segs.push([g[i],g[i+1]]);
+      }
+    }
+  }
+  log("polys="+polys.length+" segs="+segs.length);
+  const out=[];
+  for(const t of TARGETS){
+    const p={lat:t.lat,lon:t.lng};
+    let st="none",nlat=t.lat,nlng=t.lng,moved=0;
+    if(polys.some(r=>pointInRing(p,r))){st="inside_water";}
+    else{
+      let best=null;
+      for(const seg of segs){
+        const c=closestOnSeg(p,seg[0],seg[1]);
+        if(!best||c.d<best.d)best=c;
+      }
+      if(best){moved=best.d;nlat=best.pt.lat;nlng=best.pt.lon;st=best.d<=3000?"snapped":"too_far";}
+    }
+    out.push({id:t.id,status:st,lat:+nlat.toFixed(7),lng:+nlng.toFixed(7),moved_m:Math.round(moved)});
+  }
+  const rep=[];
+  for(const t of REPORT){
+    const p={lat:t.lat,lon:t.lon};
+    let st="none",moved=0;
+    if(polys.some(r=>pointInRing(p,r)))st="inside_water";
+    else{
+      let best=null;
+      for(const seg of segs){
+        const c=closestOnSeg(p,seg[0],seg[1]);
+        if(!best||c.d<best.d)best=c;
+      }
+      if(best){moved=best.d;st=best.d<=3000?"snapped":"too_far";}
+    }
+    rep.push({id:t.id,status:st,moved_m:Math.round(moved)});
+  }
+  document.getElementById('result').textContent="RESULT-OK\n"+JSON.stringify({targets:out,report:rep},null,1);
+}
+run();
+</script>
+</body>
+</html>
